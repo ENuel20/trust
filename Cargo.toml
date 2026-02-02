@@ -1,0 +1,8 @@
+[package]
+name = "trust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tun-tap = "0.1.2"
+etherparse = "0.8"
