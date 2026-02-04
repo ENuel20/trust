@@ -1,8 +1,9 @@
 #!/bin/bash
-set -e  # <--- THIS IS THE FIX
-
 cargo b --release
-
+ext=$?
+if [[ $ext -ne 0 ]]; then
+	exit $ext
+fi
 # The script will only reach here if cargo succeeds
 sudo setcap cap_net_admin=eip ./target/release/trust
 ./target/release/trust &
