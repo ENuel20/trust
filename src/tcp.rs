@@ -201,7 +201,7 @@ impl Connection {
             //  |---------------S--------|---------------------|
             //                           ^-S+X
             Ordering::Less => {
-                if end >= start && end >= x {
+                if end >= start && end <= x {
                     return false;
                 }
             }
