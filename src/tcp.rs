@@ -87,6 +87,15 @@ struct RecvSequenceSpace {
     irs: u32,
 }
 
+impl State {
+    fn is_synchronized() {
+        match *self {
+            State::SynRcvd => false,
+            State::Estab => true,
+        }
+    }
+}
+
 impl Connection {
     pub fn accept<'a>(
         nic: &mut tun_tap::Iface,
@@ -101,7 +110,6 @@ impl Connection {
         }
 
         let iss = 0;
-        let mut buf = [0u8; 1500];
 
         let mut c = Connection {
             state: State::SynRevd,
@@ -123,52 +131,83 @@ impl Connection {
                 wnd: tcph.window_size(),
                 up: false,
             },
+
+            ip: etherparse::Ipv4Header::new(
+                0,
+                64,
+                etherparse::IpTrafficClass::Tcp,
+                [
+                    iph.destination()[0],
+                    iph.destination()[1],
+                    iph.destination()[2],
+                    iph.destination()[3],
+                ],
+                [
+                    iph.source()[0],
+                    iph.source()[1],
+                    iph.source()[2],
+                    iph.source()[3],
+                ],
+            ),
+            tcp: etherparse::TcpHeader::new(
+                tcph.destination_port(),
+                tcph.source_port(),
+                c.send.iss,
+                c.send.wnd,
+            ),
         };
 
-        let mut syn_ack = etherparse::TcpHeader::new(
-            tcph.destination_port(),
-            tcph.source_port(),
-            c.send.iss,
-            c.send.wnd,
-        );
-        syn_ack.acknowledgment_number = c.recv.nxt;
-        syn_ack.syn = true;
-        syn_ack.ack = true;
-
-        let ip = etherparse::Ipv4Header::new(
-            syn_ack.header_len(),
-            64,
-            etherparse::IpTrafficClass::Tcp,
-            [
-                iph.destination()[0],
-                iph.destination()[1],
-                iph.destination()[2],
-                iph.destination()[3],
-            ],
-            [
-                iph.source()[0],
-                iph.source()[1],
-                iph.source()[2],
-                iph.source()[3],
-            ],
-        );
-        syn_ack.checksum = syn_ack
-            .calc_checksum_ipv4(&ip, &[])
-            .expect("failed to compute checksum");
-
-        eprintln!("got ip header {:02x?}", iph);
-        eprintln!("got tcp header {:02x?}", tcph);
-        //write out the headers
-        let unwritten = {
-            let mut unwritten = &mut buf[..];
-            ip.write(&mut unwritten);
-            syn_ack.write(&mut unwritten);
-            unwritten.len()
-        };
-        eprintln!("responding with {:02x?}", &buf[..buf.len() - unwritten]);
-        nic.send(&buf[..unwritten])?;
+        self.tcp.syn = true;
+        self.tcp.ack = true;
+        c.write(nic, &[])?;
 
         Ok(Some(c))
+    }
+
+    fn write(&mut self, nic: &mut tun_tap::Iface, payload: &[u8]) -> io::Result<usize> {
+        let mut buf = [0u8; 1500];
+        self.tcp.sequence_number = self.send.nxt;
+        self.tcp.acknowledge_number = self.recv.nxt;
+        let size = std::cmp::min(
+            buf.len(),
+            self.tcp.header_len() as usize + self.ip.header_len() as usize + payload.len(),
+        );
+        self.ip.set_payload_len(size);
+
+        // the kernel is nice and does this for us
+        // self.tcp.checksum = self.tcp
+        //      .calc_checksum_ipv4(&self.ip, &[]);
+        //      .expect("failed to compute checksum");
+        //
+
+        // write out the headers
+        use std::io::write;
+        let mut unwritten = &mut buf[..];
+        self.ip.write(&mut unwritten)?;
+        self.tcp.write(&mut unwritten)?;
+        let unwritten = unwritten.len();
+        let payload_bytes = unwritten.write(payload)?;
+        self.send.nxt(wrapping_add(payload_bytes as u32));
+        if self.tcp.syn {
+            self.send.nxt = self.send.nxt(wrapping_add(1));
+            self.tcp.syn = false;
+        }
+        if self.tcp.fin {
+            self.send.nxt = self.send.nxt(wrapping_add(1));
+            self.tcp.fin = false;
+        }
+
+        nic.send(&buf[..buf.len() - unwritten])?;
+        Ok(payload_bytes)
+    }
+
+    fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
+        self.tcp.rst = true;
+        //fix sequence number here
+        self.tcp.sequence_number = 0;
+        self.tcp.acknowledgement_number = 0;
+        self.write(nic, &[])?;
+        Ok(())
     }
     pub fn on_packet<'a>(
         &mut self,
@@ -177,34 +216,129 @@ impl Connection {
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<()> {
+        // first check that sequence numbers are valid (RFC 793 S3.3)
+        //
+        // acceptable ack check
+        // SND.UNA < SEG.ACK =< SND.NXT
+        // but remember wrapping!
+
+        let ackn = tcph.acknoledgement_number();
+        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+            if !self.state.is_synchronized() {
+                //according to Reset Generation, we should send a RST
+                self.send_rst(nic);
+            }
+            return Ok(());
+        }
+
+        // valid segment check, okay if it acks at least one byte, at least
+        // one of the following is true
+        //
+        // RCV.NXT =< SEG.SEQ < RCV.NXT + RCV.WND
+        // RCV.NXT =< SEG.SEQ + SEG.LEN-1 < RCV.NXT + RCV.WND
+
+        let seqn = tcp.sequence_number();
+        let mut slen = data.len();
+        if tcp.fin() {
+            slen += 1;
+        };
+
+        if tcp.syn() {
+            slen += 1;
+        };
+
+        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
+        if slen == 0 {
+            //zero lengt segment have seperate rules for accceptance
+            if self.recv.wnd == 0 {
+                if seqn != self.recv.nxt {
+                    return Ok(());
+                }
+            } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
+                return Ok(());
+            }
+        } else {
+            if self.recv.wnd == 0 {
+                return Ok(());
+            } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
+                && !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + data.len() - 1, wend)
+            {
+                return Ok(());
+            }
+        }
+
+        match self.state {
+            State::SynRcvd => {
+                //expect to get an ack for our SYN
+                if !tcph.ack() {
+                    return Ok(());
+                }
+                // must have ACKed our SYN, since we have only detected one byte and
+                // we have only sent one byte (the syn)
+                self.state = Estab;
+
+                //now lets terminate the program
+            }
+            State::Estab => {
+                unimplemented!();
+            }
+        }
     }
 
-    fn in_between_wrapped() -> bool {
+    fn in_between_wrapped(start: u32, x: u32, end: u32) -> bool {
         use std::cmp::Ordering;
         match start.cmp(x) {
             Ordering::Equal => return false,
+
             // we have:
             //
-            //  |--------------S--------X----------------------|
-            //  x is between S and E (S < X < E) in these cases:
+            //   0|--------------S--------X----------------------|(wraparound)
+            //   x is between S and E (S < X < E) in these cases:
             //
-            //  |--------------S--------X----E-----------------|
+            //   0|--------------S--------X----E-----------------|(wraparound)
             //
-            //  |-----------E---S--------X---------------------|
+            //   0|-----------E---S--------X---------------------|(wraparound)
             //
-            //  but *not* in the cases
+            //     but *not* in the cases
             //
-            //  |-----------S-----E------X---------------------|
+            //   0|-----------S-----E------X---------------------|(wraparound)
             //
-            //  |----------------|--------X--------------------|
+            //   0|----------------|--------X--------------------|(wraparound)
             //                  ^-S+E
-            //  |---------------S--------|---------------------|
-            //                           ^-S+X
+            //   0|---------------S--------|---------------------|(wraparound)
+            //                             ^-S+X
+            //      in other words iff !(S<=E<=X)
             Ordering::Less => {
                 if end >= start && end <= x {
                     return false;
                 }
             }
+
+            // we have:
+            //
+            //   0|--------------X-------S-----------------------|(wraparound)
+            //   x is between S and E (S < X < E) in these cases:
+            //
+            //   0|--------------X--------E-----S----------------|(wraparound)
+            //
+            //     but *not* in the cases
+            //
+            //   0|-----------E---X--------S---------------------|(wraparound)
+            //
+            //   0|-----------X-----S------E---------------------|(wraparound)
+            //
+            //   0|----------------|--------S--------------------|(wraparound)
+            //                  ^-S+E
+            //   0|---------------X--------|---------------------|(wraparound)
+            //                           ^-S+X
+            //      in other words iff !(S<E<X)
+            Ordering::Greater => {
+                if end < start && end > x {
+                } else {
+                    return false;
+                }
+            }
         }
+        return true;
     }
 }
