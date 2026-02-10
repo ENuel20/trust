@@ -360,59 +360,18 @@ impl Connection {
     }
 }
 
+fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
+    //from RFC1323
+    // Tcp determines if a data segment is "old" or "new" by testing
+    // whether its sequence number is within 2**31 bytes of the left edge 
+    // of the window, and if it is not discarding the data as "old", To
+    // insure that the new data is never mistakenly considered old and vice
+    // -versa, the left edge has to be at most 2^31 away from the rigt edge 
+    // of the reciever's window
+
+    lhs.wrapping_sub(rhs) > 2^31
+}
+
 fn in_between_wrapped(start: u32, x: u32, end: u32) -> bool {
-    use std::cmp::Ordering;
-    match start.cmp(&x) {
-        Ordering::Equal => return false,
-
-        // we have:
-        //
-        //   0|--------------S--------X----------------------|(wraparound)
-        //   x is between S and E (S < X < E) in these cases:
-        //
-        //   0|--------------S--------X----E-----------------|(wraparound)
-        //
-        //   0|-----------E---S--------X---------------------|(wraparound)
-        //
-        //     but *not* in the cases
-        //
-        //   0|-----------S-----E------X---------------------|(wraparound)
-        //
-        //   0|----------------|--------X--------------------|(wraparound)
-        //                  ^-S+E
-        //   0|---------------S--------|---------------------|(wraparound)
-        //                             ^-S+X
-        //      in other words iff !(S<=E<=X)
-        Ordering::Less => {
-            if end >= start && end <= x {
-                return false;
-            }
-        }
-
-        // we have:
-        //
-        //   0|--------------X-------S-----------------------|(wraparound)
-        //   x is between S and E (S < X < E) in these cases:
-        //
-        //   0|--------------X--------E-----S----------------|(wraparound)
-        //
-        //     but *not* in the cases
-        //
-        //   0|-----------E---X--------S---------------------|(wraparound)
-        //
-        //   0|-----------X-----S------E---------------------|(wraparound)
-        //
-        //   0|----------------|--------S--------------------|(wraparound)
-        //                  ^-S+E
-        //   0|---------------X--------|---------------------|(wraparound)
-        //                           ^-S+X
-        //      in other words iff !(S<E<X)
-        Ordering::Greater => {
-            if end < start && end > x {
-            } else {
-                return false;
-            }
-        }
-    }
-    return true;
+    wrapping_lt(start, x) && wrapping_lt(x, end)
 }
