@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 
 pub enum State {
@@ -25,6 +26,8 @@ pub struct Connection {
     send: SendSequenceSpace,
     ip: etherparse::Ipv4Header,
     tcp: etherparse::TcpHeader,
+    pub(crate) incoming: VecDeque<u8>,
+    pub(crate) unacked: VecDeque<u8>,
 }
 
 /*
@@ -136,12 +139,7 @@ impl Connection {
                 wnd: tcph.window_size(),
                 up: false,
             },
-            tcp: etherparse::TcpHeader::new(
-                tcph.destination_port(),
-                tcph.source_port(),
-                iss,
-                wnd,
-            ),
+            tcp: etherparse::TcpHeader::new(tcph.destination_port(), tcph.source_port(), iss, wnd),
 
             ip: etherparse::Ipv4Header::new(
                 0,
@@ -160,6 +158,9 @@ impl Connection {
                     iph.source()[3],
                 ],
             ),
+
+            incoming: Default::default(),
+            unacked: Default::default(),
         };
 
         c.tcp.syn = true;
@@ -177,13 +178,14 @@ impl Connection {
             buf.len(),
             self.tcp.header_len() as usize + self.ip.header_len() as usize + payload.len(),
         );
-        self.ip.set_payload_len(size - self.ip.header_len() as usize);
+        self.ip
+            .set_payload_len(size - self.ip.header_len() as usize);
 
         // the kernel is nice and does this for us
-        self.tcp.checksum = self.tcp
+        self.tcp.checksum = self
+            .tcp
             .calc_checksum_ipv4(&self.ip, &[])
             .expect("failed to compute checksum");
-        
 
         // write out the headers
         use std::io::Write;
@@ -260,15 +262,14 @@ impl Connection {
             if self.recv.wnd == 0 {
                 if seqn != self.recv.nxt {
                     false
-                }else {
+                } else {
                     true
                 }
             } else if !in_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
                 false
-            }else {
+            } else {
                 true
             }
-            
         } else {
             if self.recv.wnd == 0 {
                 false
@@ -280,7 +281,7 @@ impl Connection {
                 )
             {
                 false
-            }else{
+            } else {
                 true
             }
         };
@@ -332,8 +333,8 @@ impl Connection {
             //TODO
             assert!(data.is_empty());
             if let State::Estab = self.state {
-            //now lets terminate the program
-            //TODO: this should be gotten from the retransmission queue
+                //now lets terminate the program
+                //TODO: this should be gotten from the retransmission queue
                 self.tcp.fin = true;
                 self.write(nic, &[])?;
                 self.state = State::FinWait1;
@@ -363,13 +364,13 @@ impl Connection {
 fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
     //from RFC1323
     // Tcp determines if a data segment is "old" or "new" by testing
-    // whether its sequence number is within 2**31 bytes of the left edge 
+    // whether its sequence number is within 2**31 bytes of the left edge
     // of the window, and if it is not discarding the data as "old", To
     // insure that the new data is never mistakenly considered old and vice
-    // -versa, the left edge has to be at most 2^31 away from the rigt edge 
+    // -versa, the left edge has to be at most 2^31 away from the rigt edge
     // of the reciever's window
 
-    lhs.wrapping_sub(rhs) > 2^31
+    lhs.wrapping_sub(rhs) > 2 ^ 31
 }
 
 fn in_between_wrapped(start: u32, x: u32, end: u32) -> bool {
