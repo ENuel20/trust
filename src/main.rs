@@ -6,13 +6,23 @@ mod tcp;
 fn main() -> io::Result<()> {
     let mut i = trust::Interface::new()?;
     eprintln!("created interface");
-    let mut l1 = i.bind(7000)?;
+    let mut l1 = i.bind(4000)?;
+    eprintln!("bind");
     let t1 = thread::spawn(move || {
-        while let Ok(_stream) = l1.accept() {
+        eprintln!("tread");
+        while let Ok(mut stream) = l1.accept() {
             eprintln!("got connection!");
-            let n = stream.read(&mut[0]).unwrap();
-            eprintln!("read data");
-            assert_eq!(n, 0);
+            loop {
+                let mut buf = [0; 512];
+                let n = stream.read(&mut [0]).unwrap();
+                eprintln!("read {:?}b of data", n);
+                if n == 0 {
+                    eprintln!("no more data!");
+                    break;
+                } else {
+                    println!("{}", std::str::from_utf8(&buf[..n]).unwrap());
+                }
+            }
         }
     });
 

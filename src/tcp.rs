@@ -1,6 +1,16 @@
+use bitflags::bitflags;
 use std::collections::VecDeque;
 use std::io;
 
+bitflags! {
+pub(crate) struct Available : u8 {
+    const Read = 0b00000001;
+    const Write = 0b00000010;
+
+}
+}
+
+#[derive(Debug)]
 pub enum State {
     //Closed,
     //Listen,
@@ -26,10 +36,33 @@ pub struct Connection {
     send: SendSequenceSpace,
     ip: etherparse::Ipv4Header,
     tcp: etherparse::TcpHeader,
+
     pub(crate) incoming: VecDeque<u8>,
     pub(crate) unacked: VecDeque<u8>,
 }
 
+impl Connection {
+    pub(crate) fn is_rcv_closed(&self) -> bool {
+        eprintln!("asked if closed wen in {:?}", self.state);
+        if let State::TimeWait = self.state {
+            //TODO: any state after recv FIN,so also CLOSE-WAIT, LAST-ACK,CLOSED,CLOSING
+            true
+        } else {
+            false
+        }
+    }
+
+    fn availability(&self) -> Available {
+        let mut a = Available::empty();
+        eprintln!("Computing availaility");
+        if self.is_rcv_closed() || !self.incoming.is_empty() {
+            a |= Available::Read
+        }
+        // TODO: take into account self.state
+        // TODO: set Available::Write
+        a
+    }
+}
 /*
 State of the Send Sequence Space (RFC 793 S3.2)
 
@@ -188,13 +221,14 @@ impl Connection {
             .expect("failed to compute checksum");
 
         // write out the headers
+
         use std::io::Write;
         let mut unwritten = &mut buf[..];
         self.ip.write(&mut unwritten);
         self.tcp.write(&mut unwritten);
         let payload_bytes = unwritten.write(payload)?;
         let unwritten = unwritten.len();
-        self.send.nxt.wrapping_add(payload_bytes as u32);
+        self.send.nxt = self.send.nxt.wrapping_add(payload_bytes as u32);
         if self.tcp.syn {
             self.send.nxt = self.send.nxt.wrapping_add(1);
             self.tcp.syn = false;
@@ -231,13 +265,13 @@ impl Connection {
         self.write(nic, &[])?;
         Ok(())
     }
-    pub fn on_packet<'a>(
+    pub(crate) fn on_packet<'a>(
         &mut self,
         nic: &mut tun_tap::Iface,
         iph: etherparse::Ipv4HeaderSlice<'a>,
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
-    ) -> io::Result<()> {
+    ) -> io::Result<Available> {
         // first check that sequence numbers are valid (RFC 793 S3.3)
         //
         // valid segment check, okay if it acks at least one byte, at least
@@ -247,20 +281,24 @@ impl Connection {
         // RCV.NXT =< SEG.SEQ + SEG.LEN-1 < RCV.NXT + RCV.WND
 
         let seqn = self.tcp.sequence_number;
+        eprintln!("printn sequence numer!");
         let mut slen = data.len() as u32;
-        if self.tcp.fin {
+        if tcph.fin() {
             slen += 1;
         };
 
-        if self.tcp.syn {
+        if tcph.syn() {
             slen += 1;
         };
 
         let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
         let okay = if slen == 0 {
+            eprintln!("is OKAY");
             //zero lengt segment have seperate rules for accceptance
             if self.recv.wnd == 0 {
+                eprintln!("recv wnd = 0");
                 if seqn != self.recv.nxt {
+                    eprintln!("equal");
                     false
                 } else {
                     true
@@ -287,16 +325,20 @@ impl Connection {
         };
 
         if !okay {
+            eprintln!("Not Okay");
             self.write(nic, &[])?;
-            return Ok(());
+            return Ok(self.availability());
         }
 
-        self.recv.nxt = seqn.wrapping_add(slen as u32);
         //TODO: if not acceptale send an Ack
         // <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
 
         if !tcph.ack() {
-            return Ok(());
+            if tcph.syn() {
+                assert!(data.is_empty());
+                self.recv.nxt = seqn.wrapping_add(1);
+            }
+            return Ok(self.availability());
         }
 
         // acceptable ack check
@@ -305,6 +347,7 @@ impl Connection {
 
         let ackn = tcph.acknowledgment_number();
         if let State::SynRcvd = self.state {
+            eprintln!("send recieve state");
             if in_between_wrapped(
                 self.send.una.wrapping_sub(1),
                 ackn,
@@ -313,41 +356,63 @@ impl Connection {
                 // must have ACKed our SYN, since we have only detected one byte and
                 // we have only sent one byte (the syn)
                 self.state = State::Estab;
+                eprintln!("not estab");
             } else {
                 //TODO: <SEQ=SEG.ACK><CTL=RST>
                 //now lets terminate the program
                 //TODO: this should be gotten from the retransmission queue
-
-                //self.tcp.fin = true;
-                //self.write(nic, &[])?;
-                //self.state = State::FinWait1;
             }
         }
 
         if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
-            if !in_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
-                return Ok(());
+            if in_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+                self.send.una = ackn;
             }
 
-            self.send.una = ackn;
-            //TODO
-            assert!(data.is_empty());
             if let State::Estab = self.state {
-                //now lets terminate the program
-                //TODO: this should be gotten from the retransmission queue
                 self.tcp.fin = true;
-                self.write(nic, &[])?;
                 self.state = State::FinWait1;
             }
         }
         if let State::FinWait1 = self.state {
             if self.send.una == self.send.iss + 2 {
-                //our Fin as been Acked
                 self.state = State::FinWait2;
             }
         }
 
+        if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
+            let mut unread_data_at = (self.recv.nxt.wrapping_sub(seqn)) as usize;
+            if unread_data_at > data.len() {
+                // we must have a re-transmitted fin that we must have already seen
+                // nxt points to beyound the fin, but the fin is not in te data!
+
+                if unread_data_at == data.len() + 1 {
+                    unread_data_at = 0;
+                } else {
+                    // Invalid state, skip this data
+                    eprintln!("warning: unread_data_at {} exceeds data length {}", unread_data_at, data.len());
+                    return Ok(self.availability());
+                }
+                eprintln!("reading from {:?} of {:?}", unread_data_at, data);
+            }
+            eprintln!("reading from {:?} of {:?}", unread_data_at, data);
+
+            self.incoming.extend(&data[unread_data_at..]);
+
+            //Once the TCP takes responsiblity for the data is advances
+            //RCV.NXT over the data accepted, and adjust RCV.WND as appropriate
+            //to the current buffer availaility. The total of  RCV.NXT and RCV.WND
+            //should not be reduced
+
+            self.recv.nxt = seqn
+                .wrapping_add(data.len() as u32)
+                .wrapping_add(if tcph.fin() { 1 } else { 0 });
+            //send an acknowledgement of the form <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+            self.write(nic, &[])?;
+        }
+
         if tcph.fin() {
+            eprintln!("is FIN in {:?}", self.state);
             match self.state {
                 State::FinWait2 => {
                     //we are done with the connection!
@@ -357,7 +422,7 @@ impl Connection {
                 _ => unimplemented!(),
             }
         }
-        Ok(())
+        Ok(self.availability())
     }
 }
 

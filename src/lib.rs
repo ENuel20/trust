@@ -14,10 +14,12 @@ struct Quad {
     src: (Ipv4Addr, u16),
     dst: (Ipv4Addr, u16),
 }
+
 #[derive(Default)]
 struct Foobar {
     manager: Mutex<ConnectionManager>,
     pending_var: Condvar,
+    rcv_var: Condvar,
 }
 type InterfaceHandle = Arc<Foobar>;
 
@@ -82,8 +84,23 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                         };
                         match cm.connections.entry(q) {
                             Entry::Occupied(mut c) => {
-                                c.get_mut()
-                                    .on_packet(&mut nic, iph, tcph, &buf[datai..nbytes])?;
+                                let a = c.get_mut().on_packet(
+                                    &mut nic,
+                                    iph,
+                                    tcph,
+                                    &buf[datai..nbytes],
+                                )?;
+                                eprintln!("availability {:?}", a);
+
+                                //TODO: compare before/after
+                                drop(cmg);
+                                if a.contains(tcp::Available::Read) {
+                                    eprintln!("NOW AVAILABLE FOR READING");
+                                    ih.rcv_var.notify_all()
+                                }
+                                if a.contains(tcp::Available::Write) {
+                                    // TODO: ih.snd_var.notify_all()
+                                }
                             }
                             Entry::Vacant(e) => {
                                 if let Some(pending) = cm.pending.get_mut(&tcph.destination_port())
@@ -109,7 +126,7 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("ignoring weird packets {:?}", e);
+                //eprintln!("ignoring weird packets {:?}", e);
             }
         }
     }
@@ -165,14 +182,17 @@ pub struct TcpListener {
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
-        let mut cm = self.h.manager.lock().unwrap();
-        let pending = cm
-            .pending
-            .remove(&self.port)
-            .expect("ports dropped while listener still active");
-        for quads in pending {
-            //TODO: terminate cm.connections(Quad)
-            unimplemented!();
+        match self.h.manager.lock() {
+            Ok(mut cm) => {
+                if let Some(pending) = cm.pending.remove(&self.port) {
+                    for _quads in pending {
+                        //TODO: terminate cm.connections(Quad)
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("warning: could not acquire manager lock in TcpListener drop");
+            }
         }
     }
 }
@@ -204,8 +224,9 @@ pub struct TcpStream {
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
+        eprintln!("dropp");
         let mut cm = self.h.manager.lock().unwrap();
- 
+
         //TODO:send FIN on cm.connections(Quad)
         //TODO:eventually remove self.quad from cm.connections
     }
@@ -213,34 +234,50 @@ impl Drop for TcpStream {
 
 impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut cm = self.h.manager.lock().unwrap();
-        let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
+        let mut cm = self.h.manager.lock().map_err(|_| {
             io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "stream was terminated unexpectedly",
+                io::ErrorKind::Other,
+                "failed to acquire lock",
             )
         })?;
+        loop {
+            eprintln!("trying read");
+            let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "stream was terminated unexpectedly",
+                )
+            })?;
+            eprintln!("status {:?} {:?}", c.is_rcv_closed(), c.incoming.is_empty());
+            if c.is_rcv_closed() && c.incoming.is_empty() {
+                //no more data to read, and no need to block, because
+                //there wont be any more
+                eprintln!("incoming is empty");
+                return Ok(0);
+            }
 
-        if c.incoming.is_empty() {
-            //TODO: Blocks
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "no new bytes to read",
-            ));
+            if !c.incoming.is_empty() {
+                let mut nread = 0;
+                let (head, tail) = c.incoming.as_slices();
+                let hread = std::cmp::min(buf.len(), head.len());
+                eprintln!("read: {}",hread);
+                buf[..hread].copy_from_slice(&head[..hread]);
+                eprintln!("hread is equal to {:?}", hread);
+                nread += hread;
+                let tread = std::cmp::min(buf.len() - nread, tail.len());
+                buf[hread..(hread + tread)].copy_from_slice(&tail[..tread]);
+                nread += tread;
+                drop(c.incoming.drain(..nread));
+                return Ok(nread);
+            }
+            eprintln!("Not yet BLOCKED");
+            cm = self.h.rcv_var.wait(cm).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    "failed to wait on condition variable",
+                )
+            })?;
         }
-
-        //TODO: detect FIN and return nbytes = 0
-
-        let mut nread = 0;
-        let (head, tail) = c.incoming.as_slices();
-        let hread = std::cmp::min(buf.len(), head.len());
-        buf.copy_from_slice(&head[..hread]);
-        nread += hread;
-        let tread = std::cmp::min(buf.len(), tail.len());
-        buf.copy_from_slice(&tail[..tread]);
-        nread += tread;
-        drop(c.incoming.drain(..nread));
-        Ok(nread)
     }
 }
 
