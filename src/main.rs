@@ -14,7 +14,7 @@ fn main() -> io::Result<()> {
             eprintln!("got connection!");
             loop {
                 let mut buf = [0; 512];
-                let n = stream.read(&mut [0]).unwrap();
+                let n = stream.read(&mut buf[..]).unwrap();
                 eprintln!("read {:?}b of data", n);
                 if n == 0 {
                     eprintln!("no more data!");

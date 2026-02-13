@@ -368,6 +368,11 @@ impl Connection {
             if in_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
                 self.send.una = ackn;
             }
+
+            if let State::Estab = self.state {
+                self.tcp.fin = true;
+                self.state = State::FinWait1
+            }
         }
         if let State::FinWait1 = self.state {
             if self.send.una == self.send.iss + 2 {
