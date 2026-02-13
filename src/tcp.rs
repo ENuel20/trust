@@ -280,7 +280,7 @@ impl Connection {
         // RCV.NXT =< SEG.SEQ < RCV.NXT + RCV.WND
         // RCV.NXT =< SEG.SEQ + SEG.LEN-1 < RCV.NXT + RCV.WND
 
-        let seqn = self.tcp.sequence_number;
+        let seqn = tcph.sequence_number();
         eprintln!("printn sequence numer!");
         let mut slen = data.len() as u32;
         if tcph.fin() {
@@ -368,11 +368,6 @@ impl Connection {
             if in_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
                 self.send.una = ackn;
             }
-
-            if let State::Estab = self.state {
-                self.tcp.fin = true;
-                self.state = State::FinWait1;
-            }
         }
         if let State::FinWait1 = self.state {
             if self.send.una == self.send.iss + 2 {
@@ -381,18 +376,13 @@ impl Connection {
         }
 
         if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
-            let mut unread_data_at = (self.recv.nxt.wrapping_sub(seqn)) as usize;
+            let mut unread_data_at = (self.recv.nxt - seqn) as usize;
             if unread_data_at > data.len() {
                 // we must have a re-transmitted fin that we must have already seen
                 // nxt points to beyound the fin, but the fin is not in te data!
 
-                if unread_data_at == data.len() + 1 {
-                    unread_data_at = 0;
-                } else {
-                    // Invalid state, skip this data
-                    eprintln!("warning: unread_data_at {} exceeds data length {}", unread_data_at, data.len());
-                    return Ok(self.availability());
-                }
+                assert_eq!(unread_data_at, data.len() + 1);
+                unread_data_at = 0;
                 eprintln!("reading from {:?} of {:?}", unread_data_at, data);
             }
             eprintln!("reading from {:?} of {:?}", unread_data_at, data);

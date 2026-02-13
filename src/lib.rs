@@ -182,17 +182,14 @@ pub struct TcpListener {
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
-        match self.h.manager.lock() {
-            Ok(mut cm) => {
-                if let Some(pending) = cm.pending.remove(&self.port) {
-                    for _quads in pending {
-                        //TODO: terminate cm.connections(Quad)
-                    }
-                }
-            }
-            Err(_) => {
-                eprintln!("warning: could not acquire manager lock in TcpListener drop");
-            }
+        let mut cm = self.h.manager.lock().unwrap();
+        let pending = cm
+            .pending
+            .remove(&self.port)
+            .expect("ports dropped while listener still active");
+        for quads in pending {
+            //TODO: terminate cm.connections(Quad)
+            unimplemented!();
         }
     }
 }
@@ -234,12 +231,7 @@ impl Drop for TcpStream {
 
 impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut cm = self.h.manager.lock().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "failed to acquire lock",
-            )
-        })?;
+        let mut cm = self.h.manager.lock().unwrap();
         loop {
             eprintln!("trying read");
             let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
@@ -271,12 +263,7 @@ impl Read for TcpStream {
                 return Ok(nread);
             }
             eprintln!("Not yet BLOCKED");
-            cm = self.h.rcv_var.wait(cm).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    "failed to wait on condition variable",
-                )
-            })?;
+            cm = self.h.rcv_var.wait(cm).unwrap();
         }
     }
 }
