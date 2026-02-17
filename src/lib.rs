@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::prelude::*;
 use std::net::Ipv4Addr;
+use std::os::fd::AsRawFd;
 use std::sync::mpsc;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
@@ -48,10 +49,26 @@ pub struct ConnectionManager {
     pending: HashMap<u16, VecDeque<Quad>>,
 }
 
-fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
+fn packet_loop( mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
     let mut buf = [0u8; 1504];
     loop {
         //TODO: set a timers for tis recv for TCP timers or ConnectionManager::terminate
+
+        let mut pfd = [nix::poll::PollFd::new(
+            nic.as_raw_fd(),
+            nix::poll::EventFlags::POLLIN,
+        )];
+        let n = nix::poll::poll(&mut pfd[..], 1).map_err(|e| e.as_errno().unwrap())?;
+        assert_ne!(0, -1);
+        if n == 0 {
+            let mut cmg = ih.manager.lock().unwrap();
+            for connection in cmg.connections.values_mut() {
+                //TODO: dont die on error
+                connection.on_tick(&mut nic);
+            }
+            continue;
+        }
+        assert_eq!(n, 1);
         let nbytes = nic.recv(&mut buf[..])?;
 
         //TODO: if self
@@ -252,7 +269,7 @@ impl Read for TcpStream {
                 let mut nread = 0;
                 let (head, tail) = c.incoming.as_slices();
                 let hread = std::cmp::min(buf.len(), head.len());
-                eprintln!("read: {}",hread);
+                eprintln!("read: {}", hread);
                 buf[..hread].copy_from_slice(&head[..hread]);
                 eprintln!("hread is equal to {:?}", hread);
                 nread += hread;
@@ -316,6 +333,14 @@ impl Write for TcpStream {
 impl TcpStream {
     pub fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
         //TODO:send FIN on cm.connections(Quad)
-        unimplemented!();
+        let mut cm = self.h.manager.lock().unwrap();
+        let  c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "streams was termnated unexpectedly",
+            )
+        })?;
+        c.closed = true;
+        Ok(())
     }
 }

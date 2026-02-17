@@ -7,11 +7,11 @@ fn main() -> io::Result<()> {
     let mut i = trust::Interface::new()?;
     eprintln!("created interface");
     let mut l1 = i.bind(4000)?;
-    eprintln!("bind");
     let t1 = thread::spawn(move || {
-        eprintln!("tread");
         while let Ok(mut stream) = l1.accept() {
             eprintln!("got connection!");
+            stream.write(b"hello");
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
             loop {
                 let mut buf = [0; 512];
                 let n = stream.read(&mut buf[..]).unwrap();
