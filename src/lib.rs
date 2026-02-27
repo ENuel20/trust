@@ -49,7 +49,7 @@ pub struct ConnectionManager {
     pending: HashMap<u16, VecDeque<Quad>>,
 }
 
-fn packet_loop( mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
+fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
     let mut buf = [0u8; 1504];
     loop {
         //TODO: set a timers for tis recv for TCP timers or ConnectionManager::terminate
@@ -58,7 +58,7 @@ fn packet_loop( mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> 
             nic.as_raw_fd(),
             nix::poll::EventFlags::POLLIN,
         )];
-        let n = nix::poll::poll(&mut pfd[..], 1).map_err(|e| e.as_errno().unwrap())?;
+        let n = nix::poll::poll(&mut pfd[..], 10).map_err(|e| e.as_errno().unwrap())?;
         assert_ne!(0, -1);
         if n == 0 {
             let mut cmg = ih.manager.lock().unwrap();
@@ -334,7 +334,7 @@ impl TcpStream {
     pub fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
         //TODO:send FIN on cm.connections(Quad)
         let mut cm = self.h.manager.lock().unwrap();
-        let  c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
+        let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 "streams was termnated unexpectedly",

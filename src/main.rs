@@ -5,27 +5,25 @@ mod tcp;
 
 fn main() -> io::Result<()> {
     let mut i = trust::Interface::new()?;
-    eprintln!("created interface");
-    let mut l1 = i.bind(4000)?;
-    let t1 = thread::spawn(move || {
-        while let Ok(mut stream) = l1.accept() {
-            eprintln!("got connection!");
-            stream.write(b"hello");
+    eprintln!("Created Interface");
+    let mut listener = i.bind(8000)?;
+    while let Ok(mut stream) = listener.accept() {
+        eprintln!("got connection!");
+        thread::spawn(move || {
+            stream.write(b"hello from trust!\n").unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             loop {
                 let mut buf = [0; 512];
                 let n = stream.read(&mut buf[..]).unwrap();
-                eprintln!("read {:?}b of data", n);
+                eprintln!("read {}b of date", n);
                 if n == 0 {
-                    eprintln!("no more data!");
+                    eprintln!("No nore data");
                     break;
                 } else {
                     println!("{}", std::str::from_utf8(&buf[..n]).unwrap());
                 }
             }
-        }
-    });
-
-    t1.join().unwrap();
+        });
+    }
     Ok(())
 }

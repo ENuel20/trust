@@ -257,9 +257,17 @@ impl Connection {
         // write out the headers
 
         use std::io::Write;
+        let buf_len = buf.len();
         let mut unwritten = &mut buf[..];
         self.ip.write(&mut unwritten);
-        self.tcp.write(&mut unwritten);
+        let ip_header_ends_at = buf_len - unwritten.len();
+        // self.tcp.write(&mut unwritten);
+        // potpone writing the tcp header because we need the payload as one contigious slice to
+        // calculte the tcp checksum
+        unwritten = &mut unwritten[self.tcp.header_len() as usize..];
+        let tcp_header_ends_at = buf_len - unwritten.len();
+
+        //write out the payload
         let payload_bytes = {
             let mut written = 0;
             let mut limit = max_data;
@@ -274,7 +282,15 @@ impl Connection {
             written += unwritten.write(&t[..pl2])?;
             written
         };
-        let unwritten = unwritten.len();
+        let payload_ends_at = buf_len - unwritten.len();
+        // finally lets calculate the checksum and write out the tcp header
+        self.tcp.checksum = self
+            .tcp
+            .calc_checksum_ipv4(&self.ip, &buf[tcp_header_ends_at..payload_ends_at])
+            .expect("failed to compute checksum");
+
+        let mut tcp_header_buf = &mut buf[ip_header_ends_at..tcp_header_ends_at];
+        self.tcp.write(&mut tcp_header_buf);
         let mut next_seq = seq.wrapping_add(payload_bytes as u32);
         if self.tcp.syn {
             next_seq = next_seq.wrapping_add(1);
@@ -290,7 +306,7 @@ impl Connection {
         }
 
         self.timers.send_times.insert(seq, time::Instant::now());
-        nic.send(&buf[..buf.len() - unwritten])?;
+        nic.send(&buf[..payload_ends_at])?;
         Ok(payload_bytes)
     }
 
