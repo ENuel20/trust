@@ -11,6 +11,8 @@ In one terminal, run the server script:
 ```
 
 The server will start and listen for TCP connections on the tun0 interface.
+<img width="2982" height="1846" alt="image" src="https://github.com/user-attachments/assets/1e67cf06-15fa-41c1-bf0b-5dae9f793de8" />
+
 
 ### Step 2: Monitor Network Traffic with tshark
 In another terminal, set up tshark to view the network handshake and TCP metrics:
@@ -19,6 +21,8 @@ sudo tshark -i tun0
 ```
 
 This will capture and display all network packets on the tun0 interface, allowing you to see the TCP handshake and communication details.
+<img width="2987" height="993" alt="image" src="https://github.com/user-attachments/assets/64dc9151-73c1-45c6-b2d1-5f8701968aea" />
+
 
 ### Step 3: Test the Connection
 in another terminal
@@ -45,6 +49,7 @@ read
 write to me
 ok good job
 ```
+<img width="2974" height="1226" alt="image" src="https://github.com/user-attachments/assets/ccea8ec3-42bc-4479-b141-3440e6b20ba7" />
 
 ### Key Differences
 - **Option 1**: Sends a single message. The server reads it and stops immediately. This results in minimal packet exchange.
@@ -80,4 +85,5 @@ Follow this learning path to understand the implementation:
 5. **YouTube: TCP Retransmission** (Advanced)
    - https://youtu.be/NdvWI6RH1eo?si=eU5co2Itd41YWbpH
    - Deep dive into retransmission mechanisms and timeout handling
+
 
