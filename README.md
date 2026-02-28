@@ -48,7 +48,36 @@ ok good job
 
 ### Key Differences
 - **Option 1**: Sends a single message. The server reads it and stops immediately. This results in minimal packet exchange.
-- **Option 2**: Creates an interactive connection and exchanges multiple packets (3+ additional packets) with the server, allowing for back-and-forth communication.
 
-## References
-- RFC 793: Transmission Control Protocol - https://www.rfc-editor.org/rfc/rfc793.html
+## Learning Resources
+
+Follow this learning path to understand the implementation:
+
+### Phase 1: Protocol Overview & Fundamentals
+1. **RFC 1180 - TCP/IP Protocol Suite Tutorial** (Overview)
+   - https://datatracker.ietf.org/doc/html/rfc1180?hl=en-US
+   - Start here for a high-level understanding of TCP/IP concepts
+
+2. **YouTube: TCP Trace Files & Packet Analysis** (Video)
+   - https://youtu.be/xdQ9sgpkrX8?si=gzkFGBdGDD7ZlaTm
+   - Learn how to read TCP traces, understand handshakes, and track packet flow between client and server
+
+3. **YouTube: TCP Deep Dive** (Video)
+   - https://youtu.be/rmFX1V49K8U?si=eZzkhkJYzu3nWxxK
+   - Reinforces key terminologies and packet movement concepts
+
+### Phase 2: Main Implementation Reference (Core)
+**RFC 793 - Transmission Control Protocol** ⭐ **MAIN REFERENCE**
+   - https://www.rfc-editor.org/rfc/rfc793.html
+   - The primary specification for this implementation
+   - Essential reading for understanding the code architecture
+
+### Phase 3: Supplementary
+4. **RFC 791 - Internet Protocol** (Optional)
+   - https://www.rfc-editor.org/rfc/rfc791.html
+   - Provides context on the IP layer that TCP operates over
+
+5. **YouTube: TCP Retransmission** (Advanced)
+   - https://youtu.be/NdvWI6RH1eo?si=eU5co2Itd41YWbpH
+   - Deep dive into retransmission mechanisms and timeout handling
+
