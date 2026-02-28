@@ -2,15 +2,14 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::prelude::*;
 use std::net::Ipv4Addr;
-use std::os::fd::AsRawFd;
-use std::sync::mpsc;
-use std::sync::Condvar;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+
 mod tcp;
+
 const SENDQUEUE_SIZE: usize = 1024;
 
-#[derive(Clone, Copy, Hash, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 struct Quad {
     src: (Ipv4Addr, u16),
     dst: (Ipv4Addr, u16),
@@ -22,6 +21,7 @@ struct Foobar {
     pending_var: Condvar,
     rcv_var: Condvar,
 }
+
 type InterfaceHandle = Arc<Foobar>;
 
 pub struct Interface {
@@ -32,10 +32,11 @@ pub struct Interface {
 impl Drop for Interface {
     fn drop(&mut self) {
         self.ih.as_mut().unwrap().manager.lock().unwrap().terminate = true;
+
         drop(self.ih.take());
         self.jh
             .take()
-            .expect("interface dropped more tan once")
+            .expect("interface dropped more than once")
             .join()
             .unwrap()
             .unwrap();
@@ -43,7 +44,7 @@ impl Drop for Interface {
 }
 
 #[derive(Default)]
-pub struct ConnectionManager {
+struct ConnectionManager {
     terminate: bool,
     connections: HashMap<Quad, tcp::Connection>,
     pending: HashMap<u16, VecDeque<Quad>>,
@@ -51,41 +52,48 @@ pub struct ConnectionManager {
 
 fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
     let mut buf = [0u8; 1504];
-    loop {
-        //TODO: set a timers for tis recv for TCP timers or ConnectionManager::terminate
 
+    loop {
+        // we want to read from nic, but we want to make sure that we'll wake up when the next
+        // timer has to be triggered!
+        use std::os::unix::io::AsRawFd;
         let mut pfd = [nix::poll::PollFd::new(
             nic.as_raw_fd(),
             nix::poll::EventFlags::POLLIN,
         )];
         let n = nix::poll::poll(&mut pfd[..], 10).map_err(|e| e.as_errno().unwrap())?;
-        assert_ne!(0, -1);
+        assert_ne!(n, -1);
         if n == 0 {
             let mut cmg = ih.manager.lock().unwrap();
             for connection in cmg.connections.values_mut() {
-                //TODO: dont die on error
-                connection.on_tick(&mut nic);
+                // XXX: don't die on errors?
+                connection.on_tick(&mut nic)?;
             }
             continue;
         }
         assert_eq!(n, 1);
         let nbytes = nic.recv(&mut buf[..])?;
 
-        //TODO: if self
+        // TODO: if self.terminate && Arc::get_strong_refs(ih) == 1; then tear down all connections and return.
 
-        /*let eth_flags = u16::from_be_bytes([buf[0],buf[1]]);
-        let eth_proto = u16::from_be_bytes([buf[2],buf[3]]);
-        if eth_proto != 0x0800{
-            //ipv4
-            continue;
-        }*/
+        // if s/without_packet_info/new/:
+        //
+        // let _eth_flags = u16::from_be_bytes([buf[0], buf[1]]);
+        // let eth_proto = u16::from_be_bytes([buf[2], buf[3]]);
+        // if eth_proto != 0x0800 {
+        //     // not ipv4
+        //     continue;
+        // }
+        //
+        // and also include on send
+
         match etherparse::Ipv4HeaderSlice::from_slice(&buf[..nbytes]) {
             Ok(iph) => {
                 let src = iph.source_addr();
                 let dst = iph.destination_addr();
-
                 if iph.protocol() != 0x06 {
-                    //not tcp
+                    eprintln!("BAD PROTOCOL");
+                    // not tcp
                     continue;
                 }
 
@@ -94,34 +102,36 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                         use std::collections::hash_map::Entry;
                         let datai = iph.slice().len() + tcph.slice().len();
                         let mut cmg = ih.manager.lock().unwrap();
-                        let mut cm = &mut *cmg;
+                        let cm = &mut *cmg;
                         let q = Quad {
                             src: (src, tcph.source_port()),
                             dst: (dst, tcph.destination_port()),
                         };
+
                         match cm.connections.entry(q) {
                             Entry::Occupied(mut c) => {
+                                eprintln!("got packet for known quad {:?}", q);
                                 let a = c.get_mut().on_packet(
                                     &mut nic,
                                     iph,
                                     tcph,
                                     &buf[datai..nbytes],
                                 )?;
-                                eprintln!("availability {:?}", a);
 
-                                //TODO: compare before/after
+                                // TODO: compare before/after
                                 drop(cmg);
-                                if a.contains(tcp::Available::Read) {
-                                    eprintln!("NOW AVAILABLE FOR READING");
+                                if a.contains(tcp::Available::READ) {
                                     ih.rcv_var.notify_all()
                                 }
-                                if a.contains(tcp::Available::Write) {
+                                if a.contains(tcp::Available::WRITE) {
                                     // TODO: ih.snd_var.notify_all()
                                 }
                             }
                             Entry::Vacant(e) => {
+                                eprintln!("got packet for unknown quad {:?}", q);
                                 if let Some(pending) = cm.pending.get_mut(&tcph.destination_port())
                                 {
+                                    eprintln!("listening, so accepting");
                                     if let Some(c) = tcp::Connection::accept(
                                         &mut nic,
                                         iph,
@@ -138,12 +148,12 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("ignoring weird tcp packets {:?}", e)
+                        eprintln!("ignoring weird tcp packet {:?}", e);
                     }
                 }
             }
             Err(e) => {
-                //eprintln!("ignoring weird packets {:?}", e);
+                // eprintln!("ignoring weird packet {:?}", e);
             }
         }
     }
@@ -157,13 +167,9 @@ impl Interface {
 
         let jh = {
             let ih = ih.clone();
-            thread::spawn(move || {
-                let nic = nic;
-                let ih = ih;
-                let buf = [0u8; 1504];
-                packet_loop(nic, ih)
-            })
+            thread::spawn(move || packet_loop(nic, ih))
         };
+
         Ok(Interface {
             ih: Some(ih),
             jh: Some(jh),
@@ -200,16 +206,19 @@ pub struct TcpListener {
 impl Drop for TcpListener {
     fn drop(&mut self) {
         let mut cm = self.h.manager.lock().unwrap();
+
         let pending = cm
             .pending
             .remove(&self.port)
-            .expect("ports dropped while listener still active");
-        for quads in pending {
-            //TODO: terminate cm.connections(Quad)
+            .expect("port closed while listener still active");
+
+        for quad in pending {
+            // TODO: terminate cm.connections[quad]
             unimplemented!();
         }
     }
 }
+
 impl TcpListener {
     pub fn accept(&mut self) -> io::Result<TcpStream> {
         let mut cm = self.h.manager.lock().unwrap();
@@ -217,7 +226,7 @@ impl TcpListener {
             if let Some(quad) = cm
                 .pending
                 .get_mut(&self.port)
-                .expect("ports closed while listener still active")
+                .expect("port closed while listener still active")
                 .pop_front()
             {
                 return Ok(TcpStream {
@@ -238,11 +247,9 @@ pub struct TcpStream {
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        eprintln!("dropp");
-        let mut cm = self.h.manager.lock().unwrap();
-
-        //TODO:send FIN on cm.connections(Quad)
-        //TODO:eventually remove self.quad from cm.connections
+        let cm = self.h.manager.lock().unwrap();
+        // TODO: send FIN on cm.connections[quad]
+        // TODO: _eventually_ remove self.quad from cm.connections
     }
 }
 
@@ -250,18 +257,15 @@ impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut cm = self.h.manager.lock().unwrap();
         loop {
-            eprintln!("trying read");
             let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::ConnectionAborted,
                     "stream was terminated unexpectedly",
                 )
             })?;
-            eprintln!("status {:?} {:?}", c.is_rcv_closed(), c.incoming.is_empty());
+
             if c.is_rcv_closed() && c.incoming.is_empty() {
-                //no more data to read, and no need to block, because
-                //there wont be any more
-                eprintln!("incoming is empty");
+                // no more data to read, and no need to block, because there won't be any more
                 return Ok(0);
             }
 
@@ -269,9 +273,7 @@ impl Read for TcpStream {
                 let mut nread = 0;
                 let (head, tail) = c.incoming.as_slices();
                 let hread = std::cmp::min(buf.len(), head.len());
-                eprintln!("read: {}", hread);
                 buf[..hread].copy_from_slice(&head[..hread]);
-                eprintln!("hread is equal to {:?}", hread);
                 nread += hread;
                 let tread = std::cmp::min(buf.len() - nread, tail.len());
                 buf[hread..(hread + tread)].copy_from_slice(&tail[..tread]);
@@ -279,7 +281,7 @@ impl Read for TcpStream {
                 drop(c.incoming.drain(..nread));
                 return Ok(nread);
             }
-            eprintln!("Not yet BLOCKED");
+
             cm = self.h.rcv_var.wait(cm).unwrap();
         }
     }
@@ -295,17 +297,16 @@ impl Write for TcpStream {
             )
         })?;
 
-        if c.unacked.is_empty() {
-            //TODO: Blocks
+        if c.unacked.len() >= SENDQUEUE_SIZE {
+            // TODO: block
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "Too many bytes buffered",
+                "too many bytes buffered",
             ));
         }
 
         let nwrite = std::cmp::min(buf.len(), SENDQUEUE_SIZE - c.unacked.len());
         c.unacked.extend(buf[..nwrite].iter());
-        //TODO: wake up writer
 
         Ok(nwrite)
     }
@@ -322,25 +323,25 @@ impl Write for TcpStream {
         if c.unacked.is_empty() {
             Ok(())
         } else {
-            //TODO: Blocks
+            // TODO: block
             Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "Too many bytes buffered",
+                "too many bytes buffered",
             ))
         }
     }
 }
+
 impl TcpStream {
     pub fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
-        //TODO:send FIN on cm.connections(Quad)
         let mut cm = self.h.manager.lock().unwrap();
         let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::ConnectionAborted,
-                "streams was termnated unexpectedly",
+                "stream was terminated unexpectedly",
             )
         })?;
-        c.closed = true;
-        Ok(())
+
+        c.close()
     }
 }

@@ -12,7 +12,7 @@ pid=$!
 sudo ip addr add 192.168.0.1/24 dev tun0
 sudo ip link set up dev tun0
 
-# Fix: lowercase 'kill', and catch Ctrl+C (INT) too
+# lowercase 'kill', and catch Ctrl+C (INT) too
 trap "kill $pid" INT TERM
 
 wait $pid
